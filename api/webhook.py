@@ -1,0 +1,101 @@
+"""
+Vercel Serverless Webhook Handler — JAMAIKA CHECKER BOT
+يستقبل التحديثات من Telegram ويوزعها على معالجات البوت.
+"""
+from http.server import BaseHTTPRequestHandler
+import json
+import sys
+import os
+import threading
+import time
+import logging
+
+# ── ضبط المسارات قبل أى import آخر ─────────────────────────────────────────
+if "DATA_DIR" not in os.environ:
+    os.environ["DATA_DIR"] = "/tmp"
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+
+import telebot          # noqa: E402
+from bot import bot     # noqa: E402  — يستورد instance البوت المجهز بكل handlers
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
+logger = logging.getLogger(__name__)
+
+# أقصى وقت انتظار للخيوط الخلفية (ثواني) — vercel maxDuration = 60
+_MAX_THREAD_WAIT = 55
+
+
+class handler(BaseHTTPRequestHandler):
+    """WSGI-compatible handler — Vercel calls do_POST/do_GET per request."""
+
+    def log_message(self, format, *args):  # noqa: A002
+        pass  # أوقف لوج HTTP الافتراضى (verbose جداً)
+
+    # ── Health Check ─────────────────────────────────────────────────────────
+    def do_GET(self):
+        self._send(200, b"JAMAIKA CHECKER BOT is running on Vercel!")
+
+    # ── Telegram Webhook ──────────────────────────────────────────────────────
+    def do_POST(self):
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            body   = self.rfile.read(length)
+
+            # ① أرسل 200 لـ Telegram فوراً لمنع إعادة الإرسال
+            self._send(200, b"OK")
+
+            # ② حلّل التحديث
+            data   = json.loads(body.decode("utf-8"))
+            update = telebot.types.Update.de_json(data)
+
+            # ③ سجّل الخيوط الموجودة قبل المعالجة
+            before_ids = {t.ident for t in threading.enumerate()}
+
+            # ④ ادفع التحديث لـ handlers (قد تُولد خيوط خلفية لفحص الكروت)
+            bot.process_new_updates([update])
+
+            # ⑤ انتظر الخيوط الجديدة حتى تنتهى (فحص الكروت / Bulk)
+            deadline = time.time() + _MAX_THREAD_WAIT
+            while True:
+                active = [
+                    t for t in threading.enumerate()
+                    if t.ident not in before_ids
+                    and not t.daemon
+                    and t.is_alive()
+                ]
+                if not active:
+                    break
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    logger.warning(
+                        "Thread-wait timeout — %d thread(s) still running", len(active)
+                    )
+                    break
+                time.sleep(0.25)
+
+        except Exception as exc:
+            logger.exception("Webhook handler error: %s", exc)
+            # تأكد من إرسال 200 دائماً لمنع Telegram من الـ retry
+            try:
+                self._send(200, b"OK")
+            except Exception:
+                pass
+
+    # ── Helper ────────────────────────────────────────────────────────────────
+    def _send(self, code: int, body: bytes):
+        """إرسال استجابة HTTP بسيطة."""
+        self.send_response(code)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+        try:
+            self.wfile.flush()
+        except Exception:
+            pass
