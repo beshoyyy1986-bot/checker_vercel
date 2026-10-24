@@ -1,24 +1,14 @@
 {
   "version": 2,
-  "builds": [
-    {
-      "src": "api/webhook.py",
-      "use": "@vercel/python"
-    },
-    {
-      "src": "api/setup.py",
-      "use": "@vercel/python"
-    }
-  ],
+  "functions": {
+    "api/webhook.py": { "maxDuration": 60 },
+    "api/setup.py":   { "maxDuration": 15 }
+  },
   "routes": [
     { "src": "/api/webhook", "dest": "/api/webhook.py" },
     { "src": "/api/setup",   "dest": "/api/setup.py"   },
     { "src": "/(.*)",        "dest": "/api/webhook.py" }
   ],
-  "functions": {
-    "api/webhook.py": { "maxDuration": 60 },
-    "api/setup.py":   { "maxDuration": 15 }
-  },
   "env": {
     "DATA_DIR": "/tmp"
   }
