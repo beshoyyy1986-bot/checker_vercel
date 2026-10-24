@@ -1,13 +1,10 @@
 {
   "version": 2,
   "functions": {
-    "api/webhook.py": { "maxDuration": 60 },
-    "api/setup.py":   { "maxDuration": 15 }
+    "api/index.py": { "maxDuration": 60 }
   },
-  "routes": [
-    { "src": "/api/webhook", "dest": "/api/webhook.py" },
-    { "src": "/api/setup",   "dest": "/api/setup.py"   },
-    { "src": "/(.*)",        "dest": "/api/webhook.py" }
+  "rewrites": [
+    { "source": "/(.*)", "destination": "/api/index" }
   ],
   "env": {
     "DATA_DIR": "/tmp"
