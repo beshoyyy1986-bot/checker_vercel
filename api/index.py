@@ -1,6 +1,6 @@
 """
 JAMAIKA CHECKER BOT — Vercel Entry Point (Flask WSGI)
-ملف واحد يستقبل كل طلبات Telegram عبر Webhook.
+Catch-all routes تضمن استقبال أى مسار يرسله Vercel أو Telegram.
 """
 import os
 import sys
@@ -8,7 +8,7 @@ import threading
 import time
 import logging
 
-# ── إعداد المسارات قبل أى import ─────────────────────────────────────────────
+# ── إعداد البيئة ─────────────────────────────────────────────────────────────
 if "DATA_DIR" not in os.environ:
     os.environ["DATA_DIR"] = "/tmp"
 
@@ -19,7 +19,7 @@ if ROOT not in sys.path:
 from flask import Flask, request, jsonify   # noqa: E402
 import requests as http                      # noqa: E402
 import telebot                               # noqa: E402
-from bot import bot                          # noqa: E402 — كل handlers محمّلة هنا
+from bot import bot                          # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
@@ -27,43 +27,51 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BOT_TOKEN   = os.environ.get("BOT_TOKEN", "")
-_MAX_WAIT   = 55   # ثانية — vercel maxDuration = 60
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+_MAX_WAIT = 55   # ثانية (Vercel maxDuration = 60)
 
-app = Flask(__name__)   # ← Vercel بيكتشف هذا المتغير تلقائياً كـ WSGI entrypoint
-
-
-# ══════════════════════════════════════════════════════════════════
-# Health check
-# ══════════════════════════════════════════════════════════════════
-@app.route("/", methods=["GET"])
-@app.route("/api/webhook", methods=["GET"])
-def health():
-    return "JAMAIKA CHECKER BOT is running on Vercel!", 200
+# ← Vercel بيكتشف متغير `app` تلقائياً كـ WSGI entrypoint
+app = Flask(__name__)
 
 
 # ══════════════════════════════════════════════════════════════════
-# Telegram Webhook
+# Catch-all — يستقبل أى مسار (الأصلى أو المُعاد كتابته من Vercel)
 # ══════════════════════════════════════════════════════════════════
-@app.route("/", methods=["POST"])
-@app.route("/api/webhook", methods=["POST"])
-def webhook():
+@app.route("/", defaults={"path": ""}, methods=["GET", "POST"])
+@app.route("/<path:path>",             methods=["GET", "POST"])
+def main(path):
+
+    # ── POST ← Telegram webhook ──────────────────────────────────
+    if request.method == "POST":
+        return _handle_webhook()
+
+    # ── GET /...setup... ← تسجيل الـ Webhook مع Telegram ─────────
+    if "setup" in path or "setup" in request.query_string.decode():
+        return _handle_setup()
+
+    # ── GET أى حاجة تانية ← health check ─────────────────────────
+    return "JAMAIKA CHECKER BOT is running on Vercel! ✅", 200
+
+
+# ══════════════════════════════════════════════════════════════════
+# معالج Webhook
+# ══════════════════════════════════════════════════════════════════
+def _handle_webhook():
     try:
         data   = request.get_json(force=True, silent=True) or {}
         update = telebot.types.Update.de_json(data)
 
-        # سجّل الخيوط الموجودة قبل المعالجة
         before_ids = {t.ident for t in threading.enumerate()}
-
-        # وزّع التحديث على معالجات البوت (قد تُولد خيوط لفحص الكروت)
         bot.process_new_updates([update])
 
-        # انتظر الخيوط الجديدة (فحص الكروت / Bulk / Gate scan)
+        # انتظر خيوط فحص الكروت / Bulk حتى تنتهى
         deadline = time.time() + _MAX_WAIT
         while True:
             active = [
                 t for t in threading.enumerate()
-                if t.ident not in before_ids and not t.daemon and t.is_alive()
+                if t.ident not in before_ids
+                and not t.daemon
+                and t.is_alive()
             ]
             if not active or time.time() >= deadline:
                 break
@@ -72,26 +80,26 @@ def webhook():
     except Exception as exc:
         logger.exception("Webhook error: %s", exc)
 
-    # دائماً ارجع 200 لمنع Telegram من إعادة الإرسال
     return jsonify({"ok": True}), 200
 
 
 # ══════════════════════════════════════════════════════════════════
-# Webhook Setup Helper  — /api/setup?secret=<BOT_TOKEN>
+# معالج Setup — يسجّل Webhook URL مع Telegram
 # ══════════════════════════════════════════════════════════════════
-@app.route("/api/setup", methods=["GET"])
-def setup():
+def _handle_setup():
     secret = request.args.get("secret", "")
 
     if not BOT_TOKEN:
         return "BOT_TOKEN env var not set in Vercel.", 500
 
     if secret != BOT_TOKEN:
-        return "Wrong secret. Use: /api/setup?secret=<BOT_TOKEN>", 401
+        return "Wrong secret. Visit: /setup?secret=YOUR_BOT_TOKEN", 401
 
-    webhook_url = f"https://{request.host}/api/webhook"
+    # الـ Webhook يشير لجذر الموقع — كل POST هيوصل لـ _handle_webhook
+    webhook_url = f"https://{request.host}/"
+
     try:
-        resp = http.post(
+        resp   = http.post(
             f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook",
             json={"url": webhook_url, "drop_pending_updates": True},
             timeout=15,
@@ -100,6 +108,10 @@ def setup():
     except Exception as exc:
         return f"Telegram API error: {exc}", 500
 
-    status = 200 if result.get("ok") else 400
-    body   = f"Webhook: {webhook_url}\n\nTelegram: {resp.text}"
-    return body, status
+    ok  = result.get("ok", False)
+    msg = (
+        f"{'✅ Done!' if ok else '❌ Failed'}\n"
+        f"Webhook URL: {webhook_url}\n\n"
+        f"Telegram response: {resp.text}"
+    )
+    return msg, 200 if ok else 400
