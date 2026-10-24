@@ -1,6 +1,6 @@
 """
 JAMAIKA CHECKER BOT — Vercel Entry Point (Flask WSGI)
-Catch-all routes تضمن استقبال أى مسار يرسله Vercel أو Telegram.
+يسجّل الـ Webhook أوتوماتيك عند أى GET request.
 """
 import os
 import sys
@@ -33,6 +33,42 @@ _MAX_WAIT = 55   # ثانية (Vercel maxDuration = 60)
 # ← Vercel بيكتشف متغير `app` تلقائياً كـ WSGI entrypoint
 app = Flask(__name__)
 
+# ── تتبع آخر تسجيل webhook ───────────────────────────────────────────────────
+_last_webhook_host   = None
+_webhook_lock        = threading.Lock()
+
+
+# ══════════════════════════════════════════════════════════════════
+# تسجيل Webhook — يُستدعى أوتوماتيك من كل GET request
+# ══════════════════════════════════════════════════════════════════
+def _auto_register_webhook(host):
+    """يسجّل الـ Webhook مع Telegram إذا تغيّر الـ host أو لم يُسجَّل بعد."""
+    global _last_webhook_host
+
+    with _webhook_lock:
+        if _last_webhook_host == host:
+            return  # مسجَّل مسبقاً بنفس الـ host — لا حاجة لإعادة التسجيل
+
+        if not BOT_TOKEN:
+            logger.error("BOT_TOKEN not set — cannot register webhook")
+            return
+
+        webhook_url = f"https://{host}/"
+        try:
+            resp = http.post(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook",
+                json={"url": webhook_url, "drop_pending_updates": True},
+                timeout=10,
+            )
+            result = resp.json()
+            if result.get("ok"):
+                logger.info(f"✅ Webhook registered → {webhook_url}")
+                _last_webhook_host = host
+            else:
+                logger.error(f"❌ Webhook registration failed: {result}")
+        except Exception as exc:
+            logger.error(f"Webhook registration error: {exc}")
+
 
 # ══════════════════════════════════════════════════════════════════
 # Catch-all — يستقبل أى مسار (الأصلى أو المُعاد كتابته من Vercel)
@@ -45,12 +81,17 @@ def main(path):
     if request.method == "POST":
         return _handle_webhook()
 
-    # ── GET /...setup... ← تسجيل الـ Webhook مع Telegram ─────────
-    if "setup" in path or "setup" in request.query_string.decode():
-        return _handle_setup()
+    # ── GET ← تسجيل الـ Webhook أوتوماتيك + health check ────────
+    threading.Thread(
+        target=_auto_register_webhook,
+        args=(request.host,),
+        daemon=True
+    ).start()
 
-    # ── GET أى حاجة تانية ← health check ─────────────────────────
-    return "JAMAIKA CHECKER BOT is running on Vercel! ✅", 200
+    return (
+        "JAMAIKA CHECKER BOT is running on Vercel! ✅\n"
+        "Webhook auto-registration triggered."
+    ), 200
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -81,37 +122,3 @@ def _handle_webhook():
         logger.exception("Webhook error: %s", exc)
 
     return jsonify({"ok": True}), 200
-
-
-# ══════════════════════════════════════════════════════════════════
-# معالج Setup — يسجّل Webhook URL مع Telegram
-# ══════════════════════════════════════════════════════════════════
-def _handle_setup():
-    secret = request.args.get("secret", "")
-
-    if not BOT_TOKEN:
-        return "BOT_TOKEN env var not set in Vercel.", 500
-
-    if secret != BOT_TOKEN:
-        return "Wrong secret. Visit: /setup?secret=YOUR_BOT_TOKEN", 401
-
-    # الـ Webhook يشير لجذر الموقع — كل POST هيوصل لـ _handle_webhook
-    webhook_url = f"https://{request.host}/"
-
-    try:
-        resp   = http.post(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook",
-            json={"url": webhook_url, "drop_pending_updates": True},
-            timeout=15,
-        )
-        result = resp.json()
-    except Exception as exc:
-        return f"Telegram API error: {exc}", 500
-
-    ok  = result.get("ok", False)
-    msg = (
-        f"{'✅ Done!' if ok else '❌ Failed'}\n"
-        f"Webhook URL: {webhook_url}\n\n"
-        f"Telegram response: {resp.text}"
-    )
-    return msg, 200 if ok else 400
