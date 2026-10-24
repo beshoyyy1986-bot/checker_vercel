@@ -26,20 +26,41 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+APP_URL   = os.environ.get("APP_URL", "").rstrip("/")
 _MAX_WAIT = 55
 
 app = Flask(__name__)
 
+# Vercel freezes the instance the moment the response is returned, so the update
+# must be handled inside the request. telebot's worker-pool threads are created
+# at import time, which makes them invisible to the "wait for new threads" logic
+# in _handle_webhook — the response would go out before the reply was sent.
+# Running inline keeps the handler in the request thread; the long-running work
+# that handlers spawn themselves (card checks, bulk, gate scans) still creates
+# brand-new threads, which the wait loop below does pick up.
+bot.threaded = False
+
+
+def _webhook_url(host):
+    """APP_URL يثبّت العنوان على الـ alias الدائم بدل عنوان الـ deploy المتغيّر."""
+    return f"{APP_URL}/" if APP_URL else f"https://{host}/"
+
 
 def _register_webhook(host):
-    """يسجّل الـ Webhook بشكل متزامن (synchronous) مع Telegram."""
+    """يسجّل الـ Webhook مع Telegram — يتخطى التسجيل لو العنوان مطابق بالفعل."""
     if not BOT_TOKEN:
         return False, "BOT_TOKEN not set in environment variables"
 
-    webhook_url = f"https://{host}/"
+    webhook_url = _webhook_url(host)
+    api = f"https://api.telegram.org/bot{BOT_TOKEN}"
     try:
+        info = http.get(f"{api}/getWebhookInfo", timeout=10).json()
+        current = info.get("result", {}).get("url") if info.get("ok") else None
+        if current == webhook_url:
+            return True, f"{webhook_url} (already registered)"
+
         resp   = http.post(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook",
+            f"{api}/setWebhook",
             json={"url": webhook_url, "drop_pending_updates": True},
             timeout=10,
         )
@@ -79,6 +100,7 @@ def main(path):
 
 
 def _handle_webhook():
+    started = time.time()
     try:
         data   = request.get_json(force=True, silent=True) or {}
         update = telebot.types.Update.de_json(data)
@@ -94,10 +116,18 @@ def _handle_webhook():
                 and not t.daemon
                 and t.is_alive()
             ]
-            if not active or time.time() >= deadline:
+            if not active:
+                break
+            if time.time() >= deadline:
+                logger.warning(
+                    "Thread-wait timeout — %d thread(s) still running", len(active)
+                )
                 break
             time.sleep(0.25)
 
+        logger.info(
+            "Update %s handled in %.2fs", update.update_id, time.time() - started
+        )
     except Exception as exc:
         logger.exception("Webhook error: %s", exc)
 

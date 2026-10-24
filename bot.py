@@ -1668,6 +1668,10 @@ def send_banner(chat_id, user_id, caption, markup):
         logger.error(f"send_banner error: {e}")
         return None
 
+def _is_not_modified(exc):
+    """Telegram يرفض التعديل حين تكون الرسالة مطابقة تماماً — ليست خطأ حقيقياً."""
+    return "message is not modified" in str(exc).lower()
+
 def edit_banner(user_id, chat_id, caption, markup, msg_id=None):
     """تحديث رسالة البانر الموجودة (الكابشن والأزرار فقط)"""
     mid = msg_id or user_main_message.get(user_id)
@@ -1681,8 +1685,22 @@ def edit_banner(user_id, chat_id, caption, markup, msg_id=None):
         user_main_message[user_id] = mid
         return mid
     except Exception as e:
-        logger.warning(f"edit_banner fallback – sending new: {e}")
-        return send_banner(chat_id, user_id, caption, markup)
+        if _is_not_modified(e):
+            return mid
+        # بدون baner.webp تُرسل الرسالة كنص عادى بلا كابشن، فيفشل تعديل الكابشن.
+        # نعدّل النص نفسه بدل حذف الرسالة وإعادة إرسالها في كل ضغطة زر.
+        try:
+            bot.edit_message_text(
+                text=caption, chat_id=chat_id, message_id=mid,
+                reply_markup=markup, parse_mode="Markdown"
+            )
+            user_main_message[user_id] = mid
+            return mid
+        except Exception as e2:
+            if _is_not_modified(e2):
+                return mid
+            logger.warning(f"edit_banner fallback – sending new: {e2}")
+            return send_banner(chat_id, user_id, caption, markup)
 
 # ═══════════════════════════════════════
 # شريط التقدم
@@ -1795,7 +1813,7 @@ def cmd_status(message):
 
 # ═══════════════════════════════════════
 # /test (أدمن) — تشخيص البوابات
-# ═══════════════════════════════════════
+# ═══════════���═══════════════════════════
 @bot.message_handler(commands=['test'])
 def cmd_test(message):
     if message.from_user.id != ADMIN_ID:
@@ -2174,7 +2192,7 @@ def cb_menu_single(call):
                 "Select gateway 👇",
                 gates_kb('single'), msg_id=mid)
 
-# ═══════════════════════════════════════
+# ═══════════════���═══════════════════════
 # Callback: فحص مجموعة
 # ═══════════════════════════════════════
 @bot.callback_query_handler(func=lambda c: c.data == "menu_bulk")
