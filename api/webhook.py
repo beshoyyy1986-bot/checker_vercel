@@ -30,6 +30,11 @@ logger = logging.getLogger(__name__)
 # أقصى وقت انتظار للخيوط الخلفية (ثواني) — vercel maxDuration = 60
 _MAX_THREAD_WAIT = 55
 
+# Vercel يجمّد الـ instance بمجرد إرسال الاستجابة، لذلك لازم المعالج يشتغل داخل
+# الـ request نفسه. خيوط worker_pool الخاصة بـ telebot تُنشأ وقت الـ import فلا
+# تراها حلقة انتظار الخيوط الجديدة بالأسفل — الرد كان يخرج قبل ما يوصل.
+bot.threaded = False
+
 
 class handler(BaseHTTPRequestHandler):
     """WSGI-compatible handler — Vercel calls do_POST/do_GET per request."""
@@ -47,20 +52,17 @@ class handler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", 0))
             body   = self.rfile.read(length)
 
-            # ① أرسل 200 لـ Telegram فوراً لمنع إعادة الإرسال
-            self._send(200, b"OK")
-
-            # ② حلّل التحديث
+            # ① حلّل التحديث
             data   = json.loads(body.decode("utf-8"))
             update = telebot.types.Update.de_json(data)
 
-            # ③ سجّل الخيوط الموجودة قبل المعالجة
+            # ② سجّل الخيوط الموجودة قبل المعالجة
             before_ids = {t.ident for t in threading.enumerate()}
 
-            # ④ ادفع التحديث لـ handlers (قد تُولد خيوط خلفية لفحص الكروت)
+            # ③ ادفع التحديث لـ handlers (قد تُولد خيوط خلفية لفحص الكروت)
             bot.process_new_updates([update])
 
-            # ⑤ انتظر الخيوط الجديدة حتى تنتهى (فحص الكروت / Bulk)
+            # ④ انتظر الخيوط الجديدة حتى تنتهى (فحص الكروت / Bulk)
             deadline = time.time() + _MAX_THREAD_WAIT
             while True:
                 active = [
@@ -79,9 +81,13 @@ class handler(BaseHTTPRequestHandler):
                     break
                 time.sleep(0.25)
 
+            logger.info("Update %s handled", update.update_id)
+
         except Exception as exc:
             logger.exception("Webhook handler error: %s", exc)
-            # تأكد من إرسال 200 دائماً لمنع Telegram من الـ retry
+
+        finally:
+            # 200 دائماً — حتى بعد المعالجة أو عند الخطأ — لمنع Telegram من الـ retry
             try:
                 self._send(200, b"OK")
             except Exception:
